@@ -48,22 +48,25 @@ class PDFtoExcelOCR:
         df.to_excel(excel_path, index=False)
 
     def run_pipeline(self):
-        """Full pipeline: convert PDF to images, preprocess, extract text and tables."""
+        """Full pipeline: convert PDF to images, preprocess, extract text and table content as raw text."""
         images = self.convert_pdf_to_images()
         all_content_blocks = []
 
         for i, image_path in enumerate(images):
-            image = cv2.imread(image_path)
             print(f"\n📄 Processing page {i + 1}/{len(images)}")
 
-            # Preprocessing
+            # Load image from path
+            image = cv2.imread(image_path)
+
+            # Preprocess for table detection (from image path)
             preprocessed = self.preprocess_image(image_path)
 
             # === Detect tables ===
             table_bboxes = self.detect_tables(preprocessed)
+            table_bboxes = sorted(table_bboxes, key=lambda box: box[1])  # Sort top-to-bottom
             print(f"📐 Detected {len(table_bboxes)} table(s)")
 
-            # Mask out tables from image to focus on text
+            # Mask table areas to improve text OCR
             text_only = self.remove_regions(image, table_bboxes)
 
             # === Extract text blocks ===
@@ -73,18 +76,18 @@ class PDFtoExcelOCR:
                     all_content_blocks.append({
                         "page": i + 1,
                         "type": "text",
-                        "content": tb["text"],
+                        "content": tb["text"].strip(),
                         "bbox": tb["bbox"]
                     })
 
-            # === Extract table content ===
+            # === Extract raw table text ===
             for bbox in table_bboxes:
-                table = self.extract_table_from_region(image, bbox)
-                if isinstance(table, pd.DataFrame) and not table.empty and table.shape[1] > 1:
+                table_text = self.extract_table_from_region(image, bbox)
+                if table_text.strip():
                     all_content_blocks.append({
                         "page": i + 1,
                         "type": "table",
-                        "content": table
+                        "content": table_text.strip()
                     })
 
         return all_content_blocks
@@ -116,29 +119,17 @@ class PDFtoExcelOCR:
         return bboxes
 
     def extract_table_from_region(self, image, bbox):
-        x1, y1, x2, y2 = map(int, bbox)
-        table_img = image[y1:y2, x1:x2]
+        """Extract table region as raw multi-line text using OCR."""
+        x0, y0, x1, y1 = bbox
+        table_image = image[y0:y1, x0:x1]
 
-        # Convert to gray + threshold
-        gray = cv2.cvtColor(table_img, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+        # Convert to gray and apply binarization if needed (optional cleanup)
+        gray = cv2.cvtColor(table_image, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Find lines (simplified)
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 15))
-        vertical_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
-
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 1))
-        horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
-
-        # Combine line images
-        table_structure = cv2.addWeighted(vertical_lines, 0.5, horizontal_lines, 0.5, 0.0)
-        table_structure = cv2.dilate(table_structure, np.ones((2, 2), np.uint8), iterations=1)
-
-        # OCR
-        table_text = pytesseract.image_to_string(table_img, config="--psm 6")
-        lines = [line.strip() for line in table_text.split("\n") if line.strip()]
-        df = pd.DataFrame(lines)
-        return df
+        # OCR using Tesseract (assume block of text)
+        table_text = pytesseract.image_to_string(binary, config="--psm 6")
+        return table_text
 
     def export_structured_to_excel(self, content_blocks, excel_path):
         with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
@@ -231,38 +222,16 @@ class PDFtoExcelOCR:
             cv2.rectangle(masked_image, (x0, y0), (x1, y1), (255, 255, 255), thickness=-1)
         return masked_image
 
-    def export_to_txt(self, content_blocks, txt_path):
-        """Export extracted text and tables to a plain text file with paragraph structure."""
-        from collections import defaultdict
+    def export_to_txt(self, content_blocks, output_path):
+        with open(output_path, "w", encoding="utf-8") as f:
+            current_page = None
+            for block in content_blocks:
+                if block["page"] != current_page:
+                    current_page = block["page"]
+                    f.write(f"\n--- Page {current_page} ---\n")
 
-        pages = defaultdict(list)
-
-        # Group blocks by page
-        for block in content_blocks:
-            pages[block["page"]].append(block)
-
-        with open(txt_path, "w", encoding="utf-8") as f:
-            for page_num in sorted(pages.keys()):
-                f.write(f"--- Page {page_num} ---\n")
-
-                paragraph_lines = []
-                for block in pages[page_num]:
-                    if block["type"] == "text":
-                        line = block["content"].strip()
-                        if line:
-                            paragraph_lines.append(line)
-
-                    elif block["type"] == "table":
-                        # If there's text before, write it as a paragraph
-                        if paragraph_lines:
-                            f.write("\n".join(paragraph_lines) + "\n\n")
-                            paragraph_lines = []
-
-                        f.write("[Table detected]\n")
-                        df = block["content"]
-                        f.write(df.to_string(index=False))
-                        f.write("\n\n")
-
-                # Write leftover paragraph lines if any
-                if paragraph_lines:
-                    f.write("\n".join(paragraph_lines) + "\n\n")
+                if block["type"] == "text":
+                    f.write(block["content"] + "\n")
+                elif block["type"] == "table":
+                    f.write("[Table detected]\n")
+                    f.write(block["content"] + "\n")
