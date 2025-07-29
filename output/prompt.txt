@@ -1,0 +1,30 @@
+
+I’m building a PDF-to-Excel OCR pipeline for complex French-language administrative documents. 
+The documents contain tables, paragraphs, stamps, and hierarchical layouts. 
+My goal is to extract structured content from scanned PDF pages, including:
+clean text blocks (merged as paragraphs),
+table content (row/column structure),
+and then export everything into a .txt format.
+
+✅ What’s Working
+The pipeline uses pdf2image to convert PDF pages to images.
+layoutparser with the PaddleDetectionLayoutModel (PubLayNet) detects table bounding boxes accurately (bounding boxes visually align with real tables).
+PaddleOCR is used to perform OCR on cropped image regions.
+Text block detection works well using layoutparser with type filtering on 'Text'.
+
+❌ The Core Issue
+Although table regions are correctly detected and cropped, 
+the OCR output from those regions is either empty or returns unreadable/jumbled text (e.g., [⚠️ No OCR result]).
+
+🧠 What We Tried
+We implemented a method extract_table_from_region(image, bbox) that:
+Crops the table region.
+Runs PaddleOCR (ocr.ocr(...)) on that region.
+Attempts to reconstruct rows/columns by analyzing text boxes and using horizontal/vertical lines with non-max suppression (via tensorflow.image.non_max_suppression).
+The text extraction works well for paragraphs but not for tables — it returns garbage or nothing.
+
+🎯 What We’re Trying to Do Now
+We want to:
+Fix extract_table_from_region() so it returns clean table data from the detected bounding boxes.
+Ensure OCR results are correctly parsed into rows and columns, even if they're imperfect.
+Embed that into the run_pipeline() logic and export text and table content in correct order in .txt 

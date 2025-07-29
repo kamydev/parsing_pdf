@@ -11,6 +11,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, Page
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from pytesseract import Output
+from paddleocr import PaddleOCR
 
 class PDFtoExcelOCR:
     def __init__(self, pdf_path, output_dir, tesseract_cmd=None, poppler_path=None):
@@ -22,6 +23,8 @@ class PDFtoExcelOCR:
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
         os.makedirs(self.output_dir, exist_ok=True)
+
+        self.ocr = PaddleOCR(lang='fr') 
 
     def convert_pdf_to_images(self):
         images = convert_from_path(self.pdf_path, dpi=300, poppler_path=self.poppler_path)
@@ -81,8 +84,8 @@ class PDFtoExcelOCR:
                     })
 
             # === Extract raw table text ===
-            for bbox in table_bboxes:
-                table_text = self.extract_table_from_region(image, bbox)
+            for j, bbox in enumerate(table_bboxes):
+                table_text = self.extract_table_from_region(image, bbox, index=f"{i+1}_{j+1}")
                 if table_text.strip():
                     all_content_blocks.append({
                         "page": i + 1,
@@ -118,18 +121,49 @@ class PDFtoExcelOCR:
 
         return bboxes
 
-    def extract_table_from_region(self, image, bbox):
-        """Extract table region as raw multi-line text using OCR."""
-        x0, y0, x1, y1 = bbox
-        table_image = image[y0:y1, x0:x1]
+    def extract_table_from_region(self, image, bbox, index=0):
+        """
+        Extract text from a detected table region using PaddleOCR.
+        Save the crop to disk and OCR it via image path (more stable).
+        """
+        import cv2
+        import numpy as np
 
-        # Convert to gray and apply binarization if needed (optional cleanup)
-        gray = cv2.cvtColor(table_image, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        x1, y1, x2, y2 = map(int, bbox)
+        table_image = image[y1:y2, x1:x2]
 
-        # OCR using Tesseract (assume block of text)
-        table_text = pytesseract.image_to_string(binary, config="--psm 6")
-        return table_text
+        if table_image.shape[0] < 10 or table_image.shape[1] < 10:
+            return "[⚠️ Skipped tiny region]"
+
+        # Save to disk for OCR
+        crop_path = os.path.join(self.output_dir, f"page_table_{index}.png")
+        cv2.imwrite(crop_path, table_image)
+
+        try:
+            result = self.ocr.ocr(crop_path)
+
+            if not result or not isinstance(result[0], list):
+                return "[⚠️ No OCR result]"
+
+            texts = []
+            for line in result[0]:
+                if (
+                    isinstance(line, list)
+                    and len(line) == 2
+                    and isinstance(line[1], (list, tuple))
+                    and len(line[1]) == 2
+                ):
+                    text = line[1][0].strip()
+                    if text:
+                        texts.append(text)
+                else:
+                    print(f"⚠️ Skipped malformed OCR line: {line}")
+
+            return "\n".join(texts) if texts else "[⚠️ OCR found no valid text]"
+
+        except Exception as e:
+            print(f"⚠️ OCR result parsing failed: {e}")
+            return "[⚠️ OCR result parsing failed]"
 
     def export_structured_to_excel(self, content_blocks, excel_path):
         with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
