@@ -93,22 +93,30 @@ class PDFtoExcelOCR:
         return all_content_blocks
 
     def detect_tables(self, image):
-        # Detects rectangular boxes indicating tables
-        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 1))
-        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 30))
+        """Detect table-like regions using contour analysis and filter bad boxes."""
+        gray = image.copy() if len(image.shape) == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                    cv2.THRESH_BINARY_INV, 15, 10)
 
-        horizontal = cv2.erode(image, kernel_h, iterations=1)
-        horizontal = cv2.dilate(horizontal, kernel_h, iterations=1)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        bboxes = []
 
-        vertical = cv2.erode(image, kernel_v, iterations=1)
-        vertical = cv2.dilate(vertical, kernel_v, iterations=1)
+        height, width = gray.shape
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
 
-        table_mask = cv2.add(horizontal, vertical)
+            # Filter out noise and massive boxes
+            if w * h < 5000:
+                continue  # too small
+            if w > 0.9 * width and h > 0.9 * height:
+                continue  # likely whole page or major section
+            if w < 50 or h < 20:
+                continue  # too thin
 
-        contours, _ = cv2.findContours(table_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        boxes = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > 1000]
+            bboxes.append((x, y, x + w, y + h))
 
-        return boxes
+        return bboxes
 
     def extract_table_from_region(self, image, bbox):
         x1, y1, x2, y2 = map(int, bbox)
@@ -170,22 +178,29 @@ class PDFtoExcelOCR:
         doc.build(flowables)
  
     def extract_layout_blocks(self, image):
-        # Convert to RGB
+        """Extract simple line-level text blocks using pytesseract with bounding boxes."""
+        from pytesseract import Output
+
+        # Ensure correct format
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(image_rgb)
 
-        data = pytesseract.image_to_data(pil_img, output_type=Output.DATAFRAME)
-        data = data.dropna(subset=["text"])
+        data = pytesseract.image_to_data(pil_img, output_type=Output.DICT)
         blocks = []
 
-        for _, row in data.iterrows():
-            text = row["text"].strip()
-            if not text:
+        n_boxes = len(data['level'])
+        for i in range(n_boxes):
+            text = data['text'][i].strip()
+            if text == "":
                 continue
 
-            x, y, w, h = row["left"], row["top"], row["width"], row["height"]
-            bbox = (int(x), int(y), int(x + w), int(y + h))
-            blocks.append({"type": "text", "text": text, "bbox": bbox})
+            (x, y, w, h) = (data['left'][i], data['top'][i], data['width'][i], data['height'][i])
+            bbox = (x, y, x + w, y + h)
+            blocks.append({
+                "type": "text",
+                "text": text,
+                "bbox": bbox
+            })
 
         return blocks
 
