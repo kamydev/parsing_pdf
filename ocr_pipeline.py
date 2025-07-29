@@ -1,5 +1,3 @@
-# ocr_pipeline.py
-
 import os
 import cv2
 import pytesseract
@@ -13,7 +11,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, Page
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from pytesseract import Output
-
 
 class PDFtoExcelOCR:
     def __init__(self, pdf_path, output_dir, tesseract_cmd=None, poppler_path=None):
@@ -178,29 +175,28 @@ class PDFtoExcelOCR:
         doc.build(flowables)
  
     def extract_layout_blocks(self, image):
-        """Extract simple line-level text blocks using pytesseract with bounding boxes."""
-        from pytesseract import Output
-
-        # Ensure correct format
+        """Extract coherent text blocks (lines or paragraphs) using pytesseract layout data."""
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(image_rgb)
+        pil_image = Image.fromarray(image_rgb)
 
-        data = pytesseract.image_to_data(pil_img, output_type=Output.DICT)
+        data = pytesseract.image_to_data(pil_image, output_type=Output.DATAFRAME)
+        data = data.dropna(subset=["text"])
+
+        grouped = data.groupby(["block_num", "par_num", "line_num"])
+
         blocks = []
-
-        n_boxes = len(data['level'])
-        for i in range(n_boxes):
-            text = data['text'][i].strip()
-            if text == "":
-                continue
-
-            (x, y, w, h) = (data['left'][i], data['top'][i], data['width'][i], data['height'][i])
-            bbox = (x, y, x + w, y + h)
-            blocks.append({
-                "type": "text",
-                "text": text,
-                "bbox": bbox
-            })
+        for (_, _, _), group in grouped:
+            line_text = " ".join(group["text"].tolist()).strip()
+            if line_text:
+                x = group["left"].min()
+                y = group["top"].min()
+                w = group["left"].max() + group["width"].max() - x
+                h = group["top"].max() + group["height"].max() - y
+                blocks.append({
+                    "type": "text",
+                    "text": line_text,
+                    "bbox": (x, y, x + w, y + h)
+                })
 
         return blocks
 
@@ -235,15 +231,38 @@ class PDFtoExcelOCR:
             cv2.rectangle(masked_image, (x0, y0), (x1, y1), (255, 255, 255), thickness=-1)
         return masked_image
 
-    def export_to_text(self, blocks, output_path):
-        with open(output_path, "w", encoding="utf-8") as f:
-            for block in blocks:
-                f.write(f"--- Page {block['page']} | Type: {block['type']} ---\n")
-                if block["type"] == "text":
-                    f.write(block["content"].strip() + "\n\n")
-                elif block["type"] == "table":
-                    if isinstance(block["content"], pd.DataFrame):
-                        f.write(block["content"].to_string(index=False) + "\n\n")
-                    else:
-                        f.write("[⚠️ Invalid table content]\n\n")
-        print(f"✅ Exported structured content to text: {output_path}")
+    def export_to_txt(self, content_blocks, txt_path):
+        """Export extracted text and tables to a plain text file with paragraph structure."""
+        from collections import defaultdict
+
+        pages = defaultdict(list)
+
+        # Group blocks by page
+        for block in content_blocks:
+            pages[block["page"]].append(block)
+
+        with open(txt_path, "w", encoding="utf-8") as f:
+            for page_num in sorted(pages.keys()):
+                f.write(f"--- Page {page_num} ---\n")
+
+                paragraph_lines = []
+                for block in pages[page_num]:
+                    if block["type"] == "text":
+                        line = block["content"].strip()
+                        if line:
+                            paragraph_lines.append(line)
+
+                    elif block["type"] == "table":
+                        # If there's text before, write it as a paragraph
+                        if paragraph_lines:
+                            f.write("\n".join(paragraph_lines) + "\n\n")
+                            paragraph_lines = []
+
+                        f.write("[Table detected]\n")
+                        df = block["content"]
+                        f.write(df.to_string(index=False))
+                        f.write("\n\n")
+
+                # Write leftover paragraph lines if any
+                if paragraph_lines:
+                    f.write("\n".join(paragraph_lines) + "\n\n")
