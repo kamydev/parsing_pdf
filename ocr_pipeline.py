@@ -85,13 +85,14 @@ class PDFtoExcelOCR:
 
             # === Extract raw table text ===
             for j, bbox in enumerate(table_bboxes):
-                table_text = self.extract_table_from_region(image, bbox, index=f"{i+1}_{j+1}")
-                if table_text.strip():
+                table_rows = self.extract_table_from_region(image, bbox)
+                if table_rows:
                     all_content_blocks.append({
                         "page": i + 1,
                         "type": "table",
-                        "content": table_text.strip()
+                        "content": table_rows  # leave as list of rows
                     })
+
 
         return all_content_blocks
 
@@ -121,49 +122,64 @@ class PDFtoExcelOCR:
 
         return bboxes
 
-    def extract_table_from_region(self, image, bbox, index=0):
+    def extract_table_from_region(self, image, bbox):
         """
-        Extract text from a detected table region using PaddleOCR.
-        Save the crop to disk and OCR it via image path (more stable).
+        Extract structured table rows from a cropped image region.
         """
-        import cv2
-        import numpy as np
-
+        # Crop the region
         x1, y1, x2, y2 = map(int, bbox)
-        table_image = image[y1:y2, x1:x2]
+        cropped = image[y1:y2, x1:x2]
+        temp_path = "temp_cropped_table.png"
+        cv2.imwrite(temp_path, cropped)
 
-        if table_image.shape[0] < 10 or table_image.shape[1] < 10:
-            return "[⚠️ Skipped tiny region]"
+        # Run OCR
+        result = self.ocr.ocr(temp_path)[0]
 
-        # Save to disk for OCR
-        crop_path = os.path.join(self.output_dir, f"page_table_{index}.png")
-        cv2.imwrite(crop_path, table_image)
+        if not isinstance(result, dict):
+            return []
 
-        try:
-            result = self.ocr.ocr(crop_path)
+        boxes = result.get("rec_boxes", [])
+        texts = result.get("rec_texts", [])
 
-            if not result or not isinstance(result[0], list):
-                return "[⚠️ No OCR result]"
+        if len(boxes) != len(texts):
+            return []
 
-            texts = []
-            for line in result[0]:
-                if (
-                    isinstance(line, list)
-                    and len(line) == 2
-                    and isinstance(line[1], (list, tuple))
-                    and len(line[1]) == 2
-                ):
-                    text = line[1][0].strip()
-                    if text:
-                        texts.append(text)
-                else:
-                    print(f"⚠️ Skipped malformed OCR line: {line}")
+        # Utility functions
+        def get_y_center(box):
+            box = np.array(box).reshape(-1, 2)
+            return float(box[:, 1].mean())
 
-            return "\n".join(texts) if texts else "[⚠️ OCR found no valid text]"
+        def get_x_coord(box):
+            box = np.array(box).reshape(-1, 2)
+            return float(box[:, 0].min())
 
-        except Exception as e:
-            print(f"⚠️ OCR result parsing failed: {e}")
-            return "[⚠️ OCR result parsing failed]"
+        # Pair boxes with their texts
+        box_texts = [
+            (boxes[i], texts[i]) for i in range(len(boxes)) if isinstance(texts[i], str)
+        ]
+
+        # Sort by vertical center (top to bottom)
+        box_texts.sort(key=lambda x: get_y_center(x[0]))
+
+        # Group by rows (based on y proximity)
+        rows = []
+        current_row = []
+        row_threshold = 20  # pixels
+
+        for box, text in box_texts:
+            y = get_y_center(box)
+            if not current_row or abs(y - get_y_center(current_row[-1][0])) <= row_threshold:
+                current_row.append((box, text))
+            else:
+                current_row.sort(key=lambda x: get_x_coord(x[0]))
+                rows.append([t for _, t in current_row])
+                current_row = [(box, text)]
+
+        if current_row:
+            current_row.sort(key=lambda x: get_x_coord(x[0]))
+            rows.append([t for _, t in current_row])
+
+        return rows
 
     def export_structured_to_excel(self, content_blocks, excel_path):
         with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
@@ -257,15 +273,50 @@ class PDFtoExcelOCR:
         return masked_image
 
     def export_to_txt(self, content_blocks, output_path):
+        def render_table_ascii(table_rows):
+            # Handle multiline cell rows first
+            merged_rows = []
+            for row in table_rows:
+                if len(row) == 1 and merged_rows:
+                    merged_rows[-1][-1] += " " + row[0]
+                else:
+                    merged_rows.append(row)
+
+            # Determine column widths
+            num_cols = max(len(row) for row in merged_rows)
+            col_widths = [0] * num_cols
+            for row in merged_rows:
+                for i, cell in enumerate(row):
+                    col_widths[i] = max(col_widths[i], len(cell))
+
+            # Helper to format a row
+            def format_row(row):
+                padded = [row[i].ljust(col_widths[i]) if i < len(row) else " " * col_widths[i] for i in range(num_cols)]
+                return "| " + " | ".join(padded) + " |"
+
+            # Build table string
+            top_border = "+-" + "-+-".join("-" * w for w in col_widths) + "-+"
+            lines = [top_border]
+            for idx, row in enumerate(merged_rows):
+                lines.append(format_row(row))
+                lines.append(top_border)
+            return "\n".join(lines)
+
+        # Main export logic
         with open(output_path, "w", encoding="utf-8") as f:
             current_page = None
             for block in content_blocks:
                 if block["page"] != current_page:
                     current_page = block["page"]
-                    f.write(f"\n--- Page {current_page} ---\n")
+                    f.write(f"\nPage {current_page} :\n")
 
                 if block["type"] == "text":
-                    f.write(block["content"] + "\n")
+                    f.write(block["content"].strip() + "\n")
+
                 elif block["type"] == "table":
-                    f.write("[Table detected]\n")
-                    f.write(block["content"] + "\n")
+                    table = block["content"]
+                    if isinstance(table, list):
+                        table_str = render_table_ascii(table)
+                        f.write(table_str + "\n")
+                    else:
+                        f.write(table + "\n")

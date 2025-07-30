@@ -28,3 +28,6 @@ We want to:
 Fix extract_table_from_region() so it returns clean table data from the detected bounding boxes.
 Ensure OCR results are correctly parsed into rows and columns, even if they're imperfect.
 Embed that into the run_pipeline() logic and export text and table content in correct order in .txt 
+
+
+# STILL HAVING ERRORS (why its happening , arent you only integrating the code that already worked before on a seperated notebook ):
