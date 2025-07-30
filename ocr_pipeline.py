@@ -12,6 +12,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from pytesseract import Output
 from paddleocr import PaddleOCR
+from fpdf import FPDF
 
 class PDFtoExcelOCR:
     def __init__(self, pdf_path, output_dir, tesseract_cmd=None, poppler_path=None):
@@ -41,14 +42,6 @@ class PDFtoExcelOCR:
         image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         _, thresh = cv2.threshold(image, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         return thresh
-
-    def extract_text(self, image):
-        text = pytesseract.image_to_string(image, lang='eng')
-        return text
-
-    def export_to_excel(self, text_list, excel_path):
-        df = pd.DataFrame({'Page': list(range(1, len(text_list)+1)), 'Content': text_list})
-        df.to_excel(excel_path, index=False)
 
     def run_pipeline(self):
         """Full pipeline: convert PDF to images, preprocess, extract text and table content as raw text."""
@@ -181,40 +174,6 @@ class PDFtoExcelOCR:
 
         return rows
 
-    def export_structured_to_excel(self, content_blocks, excel_path):
-        with pd.ExcelWriter(excel_path, engine='xlsxwriter') as writer:
-            for i, block in enumerate(content_blocks):
-                if block["type"] == "text":
-                    df = pd.DataFrame({"Content": [block["content"]]})
-                    df.to_excel(writer, sheet_name=f"Page{block['page']}_text", index=False)
-                elif block["type"] == "table":
-                    df = block["content"]
-                    df.to_excel(writer, sheet_name=f"Page{block['page']}_table_{i}", index=False)
-
-    def export_structured_to_pdf(self, blocks, output_path):
-        doc = SimpleDocTemplate(output_path)
-        flowables = []
-        styles = getSampleStyleSheet()
-
-        for block in blocks:
-            if block["type"] == "text":
-                text = block["content"].replace("\n", "<br/>")
-                para = Paragraph(text, styles["Normal"])
-                flowables.append(para)
-                flowables.append(Spacer(1, 12))
-            elif block["type"] == "table":
-                try:
-                    df = block["content"]
-                    table_data = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
-                    t = Table(table_data)
-                    flowables.append(t)
-                    flowables.append(Spacer(1, 12))
-                except Exception as e:
-                    error_para = Paragraph(f"<b>⚠️ Table parse error:</b> {e}", styles["Normal"])
-                    flowables.append(error_para)
-
-        doc.build(flowables)
- 
     def extract_layout_blocks(self, image):
         """Extract coherent text blocks (lines or paragraphs) using pytesseract layout data."""
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -240,30 +199,6 @@ class PDFtoExcelOCR:
                 })
 
         return blocks
-
-    def classify_block_type(self, df):
-        if len(df) < 4:
-            return "text"  # too small to be a table
-
-        # Count how many lines have multiple words horizontally aligned (table-like)
-        y_rounded = df["top"].round(-1)
-        line_counts = y_rounded.value_counts()
-
-        # If there are at least 2 lines with 3+ words horizontally aligned → table
-        potential_table_rows = (line_counts >= 3).sum()
-        if potential_table_rows >= 2:
-            return "table"
-
-        return "text"
-
-    def detect_layout_correct(page):
-        elements = []
-        for el in page.layout:
-            if hasattr(el, "get_text"):
-                # You can optionally filter out whitespace or very small regions
-                x0, y0, x1, y1 = map(int, [el.x0, el.top, el.x1, el.bottom])
-                elements.append(("text", (x0, y0, x1, y1)))
-        return elements
 
     def remove_regions(self, image, bboxes):
         """Remove specified regions from an image by filling them with white rectangles."""
@@ -320,3 +255,43 @@ class PDFtoExcelOCR:
                         f.write(table_str + "\n")
                     else:
                         f.write(table + "\n")
+
+    def export_structured_to_pdf(self, content_blocks, pdf_path):
+        from fpdf import FPDF
+        import os
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+
+        # Use a Unicode-safe system font (regular only)
+        font_path = "C:/Windows/Fonts/arial.ttf"  # system font
+        pdf.add_font("CustomUnicode", "", font_path, uni=True)
+        pdf.set_font("CustomUnicode", "", size=12)
+
+        current_page = None
+
+        for block in content_blocks:
+            if block["page"] != current_page:
+                current_page = block["page"]
+                pdf.cell(0, 10, f"Page {current_page} :", ln=True)
+
+            if block["type"] == "text":
+                lines = block["content"].splitlines()
+                for line in lines:
+                    if line.strip():  # skip empty lines
+                        pdf.cell(0, 10, txt=line.strip(), ln=True)
+
+            elif block["type"] == "table":
+                table_data = block["content"]
+                if not table_data:
+                    continue
+                col_count = max(len(row) for row in table_data)
+                col_width = pdf.w / col_count - 10
+                for row in table_data:
+                    for cell in row:
+                        cell = cell if isinstance(cell, str) else str(cell)
+                        pdf.cell(col_width, 10, txt=cell.strip(), border=1)
+                    pdf.ln()
+
+        pdf.output(pdf_path)
