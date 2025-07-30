@@ -1,4 +1,4 @@
-# 🧾 PDF to Excel/Text/PDF OCR Pipeline
+# 🧾 PDF to Text/PDF OCR Pipeline
 
 This project provides a full pipeline for extracting structured information (text and tables) from scanned PDF documents using PaddleOCR and layout-aware models. It’s built for local, offline usage — suitable for confidential or sensitive documents.
 
