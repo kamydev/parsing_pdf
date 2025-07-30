@@ -14,7 +14,7 @@ from pytesseract import Output
 from paddleocr import PaddleOCR
 from fpdf import FPDF
 
-class PDFtoExcelOCR:
+class PDFtoTxtOCR:
     def __init__(self, pdf_path, output_dir, tesseract_cmd=None, poppler_path=None):
         self.pdf_path = pdf_path
         self.output_dir = output_dir
